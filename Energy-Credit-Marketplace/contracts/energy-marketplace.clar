@@ -169,3 +169,128 @@
     
     (var-set next-credit-id (+ credit-id u1))
     (ok credit-id)))
+
+(define-public (list-credit-for-sale 
+  (credit-id uint)
+  (amount uint)
+  (price-per-unit uint))
+  (let ((caller tx-sender)
+        (credit (unwrap! (map-get? energy-credits credit-id) err-not-found))
+        (listing-id (var-get next-listing-id)))
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
+    (asserts! (is-eq caller (get owner credit)) err-unauthorized)
+    (asserts! (>= (get amount credit) amount) err-insufficient-balance)
+    (asserts! (> (get expiry-date credit) block-height) err-expired-credit)
+    (asserts! (>= (ft-get-balance energy-credit caller) amount) err-insufficient-balance)
+    (asserts! (> price-per-unit u0) err-invalid-price)
+    
+    (map-set marketplace-listings listing-id {
+      seller: caller,
+      credit-id: credit-id,
+      amount: amount,
+      price-per-unit: price-per-unit,
+      listed-at: block-height,
+      active: true,
+      listing-type: "fixed"
+    })
+    
+    (var-set next-listing-id (+ listing-id u1))
+    (ok listing-id)))
+
+(define-public (create-credit-auction
+  (credit-id uint)
+  (amount uint)
+  (starting-price uint)
+  (auction-duration uint)
+  (min-increment uint))
+  (let ((caller tx-sender)
+        (credit (unwrap! (map-get? energy-credits credit-id) err-not-found))
+        (auction-id (var-get next-auction-id)))
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
+    (asserts! (is-eq caller (get owner credit)) err-unauthorized)
+    (asserts! (>= (get amount credit) amount) err-insufficient-balance)
+    (asserts! (> (get expiry-date credit) block-height) err-expired-credit)
+    (asserts! (>= auction-duration (var-get min-auction-duration)) err-invalid-amount)
+    
+    (map-set credit-auctions auction-id {
+      credit-id: credit-id,
+      seller: caller,
+      starting-price: starting-price,
+      current-bid: u0,
+      highest-bidder: none,
+      auction-end: (+ block-height auction-duration),
+      min-increment: min-increment,
+      active: true
+    })
+    
+    (var-set next-auction-id (+ auction-id u1))
+    (ok auction-id)))
+
+(define-public (place-bid (auction-id uint) (bid-amount uint))
+  (let ((caller tx-sender)
+        (auction (unwrap! (map-get? credit-auctions auction-id) err-not-found)))
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
+    (asserts! (get active auction) err-auction-ended)
+    (asserts! (< block-height (get auction-end auction)) err-auction-ended)
+    (asserts! (>= (stx-get-balance caller) bid-amount) err-insufficient-balance)
+    
+    (let ((required-bid (if (is-eq (get current-bid auction) u0)
+                          (get starting-price auction)
+                          (+ (get current-bid auction) (get min-increment auction)))))
+      (asserts! (>= bid-amount required-bid) err-bid-too-low)
+      
+      ;; Return funds to previous highest bidder
+      (match (get highest-bidder auction)
+        prev-bidder (try! (stx-transfer? (get current-bid auction) tx-sender prev-bidder))
+        true)
+      
+      ;; Escrow new bid
+      (try! (stx-transfer? bid-amount caller tx-sender))
+      
+      (map-set credit-auctions auction-id
+        (merge auction {
+          current-bid: bid-amount,
+          highest-bidder: (some caller)
+        }))
+      
+      (ok true))))
+
+(define-public (purchase-energy-credit (listing-id uint) (amount uint))
+  (let ((caller tx-sender)
+        (listing (unwrap! (map-get? marketplace-listings listing-id) err-not-found))
+        (credit (unwrap! (map-get? energy-credits (get credit-id listing)) err-not-found))
+        (transaction-id (var-get next-transaction-id)))
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
+    (asserts! (get active listing) err-not-found)
+    (asserts! (>= (get amount listing) amount) err-insufficient-balance)
+    (asserts! (> (get expiry-date credit) block-height) err-expired-credit)
+    
+    (let ((total-cost (* amount (get price-per-unit listing)))
+          (platform-fee (/ (* total-cost (var-get platform-fee-rate)) u10000))
+          (seller-amount (- total-cost platform-fee)))
+      (asserts! (>= (stx-get-balance caller) total-cost) err-insufficient-balance)
+      
+      (try! (stx-transfer? seller-amount caller (get seller listing)))
+      (try! (stx-transfer? platform-fee caller contract-owner))
+      (try! (ft-transfer? energy-credit amount (get seller listing) caller))
+      
+      ;; Record transaction
+      (map-set credit-transactions transaction-id {
+        from: (get seller listing),
+        to: caller,
+        credit-id: (get credit-id listing),
+        amount: amount,
+        price: (get price-per-unit listing),
+        transaction-date: block-height,
+        transaction-type: "purchase"
+      })
+      
+      (var-set next-transaction-id (+ transaction-id u1))
+      
+      (if (is-eq amount (get amount listing))
+        (map-set marketplace-listings listing-id
+          (merge listing {active: false}))
+        (map-set marketplace-listings listing-id
+          (merge listing {amount: (- (get amount listing) amount)})))
+      
+      (ok true))))
