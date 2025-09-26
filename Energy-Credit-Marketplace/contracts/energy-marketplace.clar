@@ -115,7 +115,7 @@
       energy-type: energy-type,
       verified: false,
       total-issued: u0,
-      registration-date: block-height,
+      registration-date: stacks-block-height,
       reputation-score: u100,
       country: country,
       certification: certification
@@ -146,7 +146,7 @@
     (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (get verified issuer-info) err-unauthorized)
     (asserts! (> amount u0) err-invalid-amount)
-    (asserts! (> expiry-date block-height) err-invalid-amount)
+    (asserts! (> expiry-date stacks-block-height) err-invalid-amount)
     
     (try! (ft-mint? energy-credit amount caller))
     
@@ -156,7 +156,7 @@
       energy-type: (get energy-type issuer-info),
       amount: amount,
       price-per-unit: price-per-unit,
-      issue-date: block-height,
+      issue-date: stacks-block-height,
       expiry-date: expiry-date,
       location: location,
       verified: true,
@@ -180,7 +180,7 @@
     (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (is-eq caller (get owner credit)) err-unauthorized)
     (asserts! (>= (get amount credit) amount) err-insufficient-balance)
-    (asserts! (> (get expiry-date credit) block-height) err-expired-credit)
+    (asserts! (> (get expiry-date credit) stacks-block-height) err-expired-credit)
     (asserts! (>= (ft-get-balance energy-credit caller) amount) err-insufficient-balance)
     (asserts! (> price-per-unit u0) err-invalid-price)
     
@@ -189,7 +189,7 @@
       credit-id: credit-id,
       amount: amount,
       price-per-unit: price-per-unit,
-      listed-at: block-height,
+      listed-at: stacks-block-height,
       active: true,
       listing-type: "fixed"
     })
@@ -209,7 +209,7 @@
     (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (is-eq caller (get owner credit)) err-unauthorized)
     (asserts! (>= (get amount credit) amount) err-insufficient-balance)
-    (asserts! (> (get expiry-date credit) block-height) err-expired-credit)
+    (asserts! (> (get expiry-date credit) stacks-block-height) err-expired-credit)
     (asserts! (>= auction-duration (var-get min-auction-duration)) err-invalid-amount)
     
     (map-set credit-auctions auction-id {
@@ -218,7 +218,7 @@
       starting-price: starting-price,
       current-bid: u0,
       highest-bidder: none,
-      auction-end: (+ block-height auction-duration),
+      auction-end: (+ stacks-block-height auction-duration),
       min-increment: min-increment,
       active: true
     })
@@ -231,7 +231,7 @@
         (auction (unwrap! (map-get? credit-auctions auction-id) err-not-found)))
     (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (get active auction) err-auction-ended)
-    (asserts! (< block-height (get auction-end auction)) err-auction-ended)
+    (asserts! (< stacks-block-height (get auction-end auction)) err-auction-ended)
     (asserts! (>= (stx-get-balance caller) bid-amount) err-insufficient-balance)
     
     (let ((required-bid (if (is-eq (get current-bid auction) u0)
@@ -263,7 +263,7 @@
     (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (get active listing) err-not-found)
     (asserts! (>= (get amount listing) amount) err-insufficient-balance)
-    (asserts! (> (get expiry-date credit) block-height) err-expired-credit)
+    (asserts! (> (get expiry-date credit) stacks-block-height) err-expired-credit)
     
     (let ((total-cost (* amount (get price-per-unit listing)))
           (platform-fee (/ (* total-cost (var-get platform-fee-rate)) u10000))
@@ -281,7 +281,7 @@
         credit-id: (get credit-id listing),
         amount: amount,
         price: (get price-per-unit listing),
-        transaction-date: block-height,
+        transaction-date: stacks-block-height,
         transaction-type: "purchase"
       })
       
@@ -307,7 +307,7 @@
       carbon-footprint: carbon-footprint,
       credits-purchased: u0,
       credits-retired: u0,
-      join-date: block-height,
+      join-date: stacks-block-height,
       verified: false
     }))))
 
@@ -332,7 +332,7 @@
       credit-id: u0, ;; General transfer, not tied to specific credit
       amount: amount,
       price: u0,
-      transaction-date: block-height,
+      transaction-date: stacks-block-height,
       transaction-type: "transfer"
     })
     
@@ -361,18 +361,20 @@
       credit-id: u0,
       amount: amount,
       price: u0,
-      transaction-date: block-height,
+      transaction-date: stacks-block-height,
       transaction-type: "retirement"
     })
     
     (var-set next-transaction-id (+ transaction-id u1))
-    (ok true)))
+    (ok amount))) ;; Return the amount retired
 
+;; Fixed batch retirement function
 (define-public (batch-retire-credits (amounts (list 10 uint)))
   (let ((caller tx-sender))
     (asserts! (not (var-get contract-paused)) err-contract-paused)
     (fold check-and-retire amounts (ok u0))))
 
+;; Fixed helper function with matching return type
 (define-private (check-and-retire (amount uint) (previous (response uint uint)))
   (match previous
     success (retire-credit amount)
@@ -400,14 +402,14 @@
 (define-public (finalize-auction (auction-id uint))
   (let ((auction (unwrap! (map-get? credit-auctions auction-id) err-not-found)))
     (asserts! (get active auction) err-auction-ended)
-    (asserts! (>= block-height (get auction-end auction)) err-auction-ended)
+    (asserts! (>= stacks-block-height (get auction-end auction)) err-auction-ended)
     
     (match (get highest-bidder auction)
       winner (begin
-        (try! (ft-transfer? energy-credit (get amount auction) (get seller auction) winner))
+        (try! (ft-transfer? energy-credit (get credit-id auction) (get seller auction) winner))
         (try! (stx-transfer? (get current-bid auction) tx-sender (get seller auction)))
         (map-set credit-auctions auction-id (merge auction {active: false}))
-        (ok winner))
+        (ok (some winner)))
       (begin
         (map-set credit-auctions auction-id (merge auction {active: false}))
         (ok none)))))
@@ -451,7 +453,7 @@
 
 (define-read-only (is-credit-expired (credit-id uint))
   (match (map-get? energy-credits credit-id)
-    credit (> block-height (get expiry-date credit))
+    credit (> stacks-block-height (get expiry-date credit))
     false))
 
 (define-read-only (get-active-listings-by-seller (seller principal))
