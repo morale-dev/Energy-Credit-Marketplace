@@ -377,3 +377,96 @@
   (match previous
     success (retire-credit amount)
     error (err error)))
+
+(define-public (pause-contract)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set contract-paused true)
+    (ok true)))
+
+(define-public (unpause-contract)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set contract-paused false)
+    (ok true)))
+
+(define-public (update-platform-fee (new-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= new-rate u1000) err-invalid-amount) ;; Max 10%
+    (var-set platform-fee-rate new-rate)
+    (ok true)))
+
+(define-public (finalize-auction (auction-id uint))
+  (let ((auction (unwrap! (map-get? credit-auctions auction-id) err-not-found)))
+    (asserts! (get active auction) err-auction-ended)
+    (asserts! (>= block-height (get auction-end auction)) err-auction-ended)
+    
+    (match (get highest-bidder auction)
+      winner (begin
+        (try! (ft-transfer? energy-credit (get amount auction) (get seller auction) winner))
+        (try! (stx-transfer? (get current-bid auction) tx-sender (get seller auction)))
+        (map-set credit-auctions auction-id (merge auction {active: false}))
+        (ok winner))
+      (begin
+        (map-set credit-auctions auction-id (merge auction {active: false}))
+        (ok none)))))
+
+(define-read-only (get-issuer-info (issuer principal))
+  (map-get? credit-issuers issuer))
+
+(define-read-only (get-credit-info (credit-id uint))
+  (map-get? energy-credits credit-id))
+
+(define-read-only (get-listing-info (listing-id uint))
+  (map-get? marketplace-listings listing-id))
+
+(define-read-only (get-auction-info (auction-id uint))
+  (map-get? credit-auctions auction-id))
+
+(define-read-only (get-user-profile (user principal))
+  (map-get? user-profiles user))
+
+(define-read-only (get-transaction-info (transaction-id uint))
+  (map-get? credit-transactions transaction-id))
+
+(define-read-only (get-user-credit-balance (user principal))
+  (ft-get-balance energy-credit user))
+
+(define-read-only (get-total-supply)
+  (ft-get-supply energy-credit))
+
+(define-read-only (get-contract-status)
+  {
+    paused: (var-get contract-paused),
+    platform-fee-rate: (var-get platform-fee-rate),
+    next-credit-id: (var-get next-credit-id),
+    next-listing-id: (var-get next-listing-id),
+    next-auction-id: (var-get next-auction-id),
+    total-transactions: (var-get next-transaction-id)
+  })
+
+(define-read-only (calculate-platform-fee (amount uint))
+  (/ (* amount (var-get platform-fee-rate)) u10000))
+
+(define-read-only (is-credit-expired (credit-id uint))
+  (match (map-get? energy-credits credit-id)
+    credit (> block-height (get expiry-date credit))
+    false))
+
+(define-read-only (get-active-listings-by-seller (seller principal))
+  (let ((listings (list)))
+    ;; This would need to be implemented with a more complex iteration
+    ;; for a production contract, but shows the concept
+    (ok u0)))
+
+(define-read-only (get-carbon-impact (user principal))
+  (match (map-get? user-profiles user)
+    profile {
+      carbon-footprint: (get carbon-footprint profile),
+      credits-retired: (get credits-retired profile),
+      net-impact: (if (>= (get credits-retired profile) (get carbon-footprint profile))
+                    (- (get credits-retired profile) (get carbon-footprint profile))
+                    u0)
+    }
+    {carbon-footprint: u0, credits-retired: u0, net-impact: u0}))
