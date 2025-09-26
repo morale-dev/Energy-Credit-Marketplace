@@ -101,3 +101,71 @@
 (define-data-var contract-paused bool false)
 (define-data-var platform-fee-rate uint u250) ;; 2.5% in basis points
 (define-data-var min-auction-duration uint u1440) ;; 1440 blocks (~1 day)
+
+(define-public (register-as-issuer 
+  (name (string-ascii 64))
+  (energy-type (string-ascii 32))
+  (country (string-ascii 32))
+  (certification (string-ascii 64)))
+  (let ((caller tx-sender))
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
+    (asserts! (is-none (map-get? credit-issuers caller)) err-unauthorized)
+    (ok (map-set credit-issuers caller {
+      name: name,
+      energy-type: energy-type,
+      verified: false,
+      total-issued: u0,
+      registration-date: block-height,
+      reputation-score: u100,
+      country: country,
+      certification: certification
+    }))))
+
+(define-public (verify-issuer (issuer principal))
+  (let ((issuer-info (unwrap! (map-get? credit-issuers issuer) err-not-found)))
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (ok (map-set credit-issuers issuer
+      (merge issuer-info {verified: true})))))
+
+(define-public (update-issuer-reputation (issuer principal) (new-score uint))
+  (let ((issuer-info (unwrap! (map-get? credit-issuers issuer) err-not-found)))
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (ok (map-set credit-issuers issuer
+      (merge issuer-info {reputation-score: new-score})))))
+
+(define-public (issue-energy-credit 
+  (amount uint)
+  (price-per-unit uint)
+  (expiry-date uint)
+  (location (string-ascii 128))
+  (carbon-offset uint)
+  (certificate-hash (string-ascii 64)))
+  (let ((caller tx-sender)
+        (credit-id (var-get next-credit-id))
+        (issuer-info (unwrap! (map-get? credit-issuers caller) err-not-found)))
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
+    (asserts! (get verified issuer-info) err-unauthorized)
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (> expiry-date block-height) err-invalid-amount)
+    
+    (try! (ft-mint? energy-credit amount caller))
+    
+    (map-set energy-credits credit-id {
+      issuer: caller,
+      owner: caller,
+      energy-type: (get energy-type issuer-info),
+      amount: amount,
+      price-per-unit: price-per-unit,
+      issue-date: block-height,
+      expiry-date: expiry-date,
+      location: location,
+      verified: true,
+      carbon-offset: carbon-offset,
+      certificate-hash: certificate-hash
+    })
+    
+    (map-set credit-issuers caller
+      (merge issuer-info {total-issued: (+ (get total-issued issuer-info) amount)}))
+    
+    (var-set next-credit-id (+ credit-id u1))
+    (ok credit-id)))
