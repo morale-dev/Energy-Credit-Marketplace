@@ -294,3 +294,86 @@
           (merge listing {amount: (- (get amount listing) amount)})))
       
       (ok true))))
+
+(define-public (create-user-profile
+  (name (string-ascii 64))
+  (email (string-ascii 128))
+  (carbon-footprint uint))
+  (let ((caller tx-sender))
+    (asserts! (is-none (map-get? user-profiles caller)) err-unauthorized)
+    (ok (map-set user-profiles caller {
+      name: name,
+      email: email,
+      carbon-footprint: carbon-footprint,
+      credits-purchased: u0,
+      credits-retired: u0,
+      join-date: block-height,
+      verified: false
+    }))))
+
+(define-public (verify-user (user principal))
+  (let ((profile (unwrap! (map-get? user-profiles user) err-not-found)))
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (ok (map-set user-profiles user
+      (merge profile {verified: true})))))
+
+(define-public (transfer-credit (recipient principal) (amount uint))
+  (let ((caller tx-sender)
+        (transaction-id (var-get next-transaction-id)))
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
+    (asserts! (>= (ft-get-balance energy-credit caller) amount) err-insufficient-balance)
+    
+    (try! (ft-transfer? energy-credit amount caller recipient))
+    
+    ;; Record transaction
+    (map-set credit-transactions transaction-id {
+      from: caller,
+      to: recipient,
+      credit-id: u0, ;; General transfer, not tied to specific credit
+      amount: amount,
+      price: u0,
+      transaction-date: block-height,
+      transaction-type: "transfer"
+    })
+    
+    (var-set next-transaction-id (+ transaction-id u1))
+    (ok true)))
+
+(define-public (retire-credit (amount uint))
+  (let ((caller tx-sender)
+        (profile (map-get? user-profiles caller))
+        (transaction-id (var-get next-transaction-id)))
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
+    (asserts! (>= (ft-get-balance energy-credit caller) amount) err-insufficient-balance)
+    
+    (try! (ft-burn? energy-credit amount caller))
+    
+    ;; Update user profile if exists
+    (match profile
+      user-data (map-set user-profiles caller
+        (merge user-data {credits-retired: (+ (get credits-retired user-data) amount)}))
+      true)
+    
+    ;; Record retirement transaction
+    (map-set credit-transactions transaction-id {
+      from: caller,
+      to: caller,
+      credit-id: u0,
+      amount: amount,
+      price: u0,
+      transaction-date: block-height,
+      transaction-type: "retirement"
+    })
+    
+    (var-set next-transaction-id (+ transaction-id u1))
+    (ok true)))
+
+(define-public (batch-retire-credits (amounts (list 10 uint)))
+  (let ((caller tx-sender))
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
+    (fold check-and-retire amounts (ok u0))))
+
+(define-private (check-and-retire (amount uint) (previous (response uint uint)))
+  (match previous
+    success (retire-credit amount)
+    error (err error)))
